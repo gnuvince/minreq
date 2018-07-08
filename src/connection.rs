@@ -135,7 +135,7 @@ fn get_response_length(response: &str) -> usize {
     for line in response.lines() {
         byte_count += line.len() + 2;
         if line.starts_with("Content-Length: ") {
-            byte_count += line.clone()[16..].parse::<usize>().unwrap();
+            byte_count += line[16..].parse::<usize>().unwrap();
         }
     }
     byte_count
