@@ -40,12 +40,10 @@ impl Connection {
     /// connection, and returns a [`Response`](struct.Response.html).
     #[cfg(feature = "https")]
     pub(crate) fn send_https(self) -> Result<Response, Error> {
-        let host = self.request.host.clone();
-        let bytes = self.request.into_string().into_bytes();
+        let host = &self.request.host;
 
         // Rustls setup
-        let dns_name = host.clone();
-        let dns_name = dns_name.split(":").next().unwrap();
+        let dns_name = host.split(":").next().unwrap();
         let dns_name = DNSNameRef::try_from_ascii_str(dns_name).unwrap();
         let mut config = ClientConfig::new();
         config
@@ -56,6 +54,8 @@ impl Connection {
         // IO
         let mut stream = create_tcp_stream(host, self.timeout)?;
         let mut tls = rustls::Stream::new(&mut sess, &mut stream);
+
+        let bytes = self.request.into_string().into_bytes();
         tls.write(&bytes)?;
         match read_from_stream(tls) {
             Ok(result) => Ok(Response::from_string(result)),
@@ -66,11 +66,9 @@ impl Connection {
     /// Sends the [`Request`](struct.Request.html), consumes this
     /// connection, and returns a [`Response`](struct.Response.html).
     pub(crate) fn send(self) -> Result<Response, Error> {
-        let host = self.request.host.clone();
-        let bytes = self.request.into_string().into_bytes();
-
         // IO
-        let mut stream = create_tcp_stream(host, self.timeout)?;
+        let mut stream = create_tcp_stream(&self.request.host, self.timeout)?;
+        let bytes = self.request.into_string().into_bytes();
         stream.write_all(&bytes)?;
         match read_from_stream(&stream) {
             Ok(response) => Ok(Response::from_string(response)),
@@ -85,7 +83,7 @@ impl Connection {
     }
 }
 
-fn create_tcp_stream(host: String, timeout: u64) -> Result<TcpStream, Error> {
+fn create_tcp_stream(host: &str, timeout: u64) -> Result<TcpStream, Error> {
     let stream = TcpStream::connect(host)?;
     let timeout = Some(Duration::from_secs(timeout));
     stream.set_read_timeout(timeout).ok();
