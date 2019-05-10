@@ -103,6 +103,137 @@ fn create_tcp_stream(host: String, timeout: Option<u64>) -> Result<TcpStream, Er
     Ok(stream)
 }
 
+fn parse_status_line<T: Read>(stream: &mut T) -> Result<(i32, String), Error> {
+    enum State {
+        HttpSlash,
+        VersionMajor,
+        VersionMinor,
+        Code,
+        Reason,
+        CR,
+    };
+    use State::*;
+
+    const HTTP_SLASH: &[u8] = b"HTTP/";
+    let mut http_idx: usize = 0;
+    let mut curr_state = HttpSlash;
+    // The longest response reason (416, "Requested Range Not Satisfiable")
+    // is 31 characters.
+    let mut buf: Vec<u8> = Vec::with_capacity(32);
+    let mut code: i32 = 0;
+
+    for b in stream.bytes() {
+        let b = b?;
+        match curr_state {
+            HttpSlash => {
+                if http_idx == HTTP_SLASH.len() {
+                    curr_state = VersionMajor;
+                } else if HTTP_SLASH[http_idx] == b {
+                    http_idx += 1;
+                } else {
+                    break;
+                }
+            }
+
+            VersionMajor => {
+                if b == b'.' {
+                    curr_state = VersionMinor;
+                } else if !b.is_ascii_digit() {
+                    break;
+                }
+            }
+
+            VersionMinor => {
+                if b == b' ' {
+                    curr_state = Code;
+                } else if !b.is_ascii_digit() {
+                    break;
+                }
+            }
+
+            Code => {
+                // status codes are always 3 digits
+                if code >= 999 {
+                    break;
+                }
+
+                if b == b' ' {
+                    if code < 100 {
+                        break;
+                    }
+                    curr_state = Reason;
+                } else if b.is_ascii_digit() {
+                    code = 10*code + ((b - b'0') as i32);
+                } else {
+                    break;
+                }
+            }
+
+            Reason => {
+                if b == b'\r' {
+                    curr_state = CR;
+                } else {
+                    buf.push(b);
+                }
+            }
+
+            CR => {
+                if b == b'\n' {
+                    if let Ok(reason) = String::from_utf8(buf) {
+                        return Ok((code, reason));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    return Err(Error::new(ErrorKind::Other, "not a valid HTTP status line"));
+}
+
+
+#[test]
+fn status_line() {
+    macro_rules! assert_status {
+        ($status_line:expr, $method:ident) => {
+            {
+                let mut line: &[u8] = $status_line;
+                assert!(parse_status_line(&mut line).$method());
+            }
+        }
+    }
+
+    assert_status!(b"HTTP/1.0 200 OK\r\n", is_ok);
+    assert_status!(b"HTTP/1.0 404 Not found\r\n", is_ok);
+    assert_status!(b"HTTP/1.0 404 \r\n", is_ok); // XXX: should this be accepted?
+
+    {
+        let mut line: &[u8] = b"HTTP/1.0 200 OK\r\n";
+        assert_eq!((200, "OK".to_owned()), parse_status_line(&mut line).unwrap());
+    }
+
+    {
+        let mut line: &[u8] = b"HTTP/1.0 404 Not found\r\n";
+        assert_eq!((404, "Not found".to_owned()), parse_status_line(&mut line).unwrap());
+    }
+
+    assert_status!(b"", is_err);
+    assert_status!(b"HTTP", is_err);
+    assert_status!(b"HTTP/", is_err);
+    assert_status!(b"HTTP/1", is_err);
+    assert_status!(b"HTTP/1.", is_err);
+    assert_status!(b"HTTP/1.1", is_err);
+    assert_status!(b"HTTP/1.1 200", is_err);
+    assert_status!(b"HTTP/1.1 200 OK", is_err);
+    assert_status!(b"HTTP/1.1 200 OK\r", is_err);
+    assert_status!(b"HTTP,1.1 200 OK\r\n", is_err);
+    assert_status!(b"HTTP/1,1 200 OK\r\n", is_err);
+    assert_status!(b"HTTP/1.1 x OK\r\n", is_err);
+
+    assert_status!(b"HTTP/1.1 99 OK\r\n", is_err);
+    assert_status!(b"HTTP/1.1 1000 OK\r\n", is_err);
+}
+
+
 /// Reads the stream until it can't or it reaches the end of the HTTP
 /// response.
 fn read_from_stream<T: Read>(stream: T, head: bool) -> Result<String, Error> {
