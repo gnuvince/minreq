@@ -233,6 +233,11 @@ fn status_line() {
     assert_status!(b"HTTP/1.1 1000 OK\r\n", is_err);
 }
 
+fn parse_headers<T: Read>(stream: &mut T) -> Result<HashMap<String, String>, Error> {
+    let mut bytes = stream.bytes();
+
+}
+
 
 /// Reads the stream until it can't or it reaches the end of the HTTP
 /// response.
