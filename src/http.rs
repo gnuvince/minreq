@@ -1,7 +1,7 @@
 use crate::connection::Connection;
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Error;
+use std::io::{Error, Read};
 
 /// A URL type for requests.
 pub type URL = String;
@@ -258,19 +258,115 @@ fn parse_url(url: URL) -> (URL, URL, bool) {
     (first, second, https)
 }
 
-pub(crate) fn parse_status_line(http_response: &[u8]) -> (i32, String) {
-    let (line, _) = split_at(http_response, "\r\n");
-    if let Ok(line) = std::str::from_utf8(line) {
-        let mut split = line.split(' ');
-        if let Some(code) = split.nth(1) {
-            if let Ok(code) = code.parse::<i32>() {
-                if let Some(reason) = split.next() {
-                    return (code, reason.to_string());
+
+pub(crate) fn parse_status_line(buf: &[u8]) -> (i32, String) {
+    status_line_from_reader(buf)
+}
+
+pub(crate) fn status_line_from_reader<R: Read>(stream: R) -> (i32, String) {
+    const HTTP_SLASH: &[u8] = b"HTTP/";
+
+    #[derive(Debug, Clone, Copy)]
+    enum State {
+        Http(usize),
+        FirstNumber(usize),
+        SecondNumber(usize),
+        Code,
+        Reason,
+        CR,
+    };
+
+    let mut state = State::Http(0);
+    let mut code: i32 = 0;
+    let mut reason_buf: Vec<u8> = Vec::with_capacity(32);
+
+    for res in stream.bytes() {
+        let b = match res {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+
+        match state {
+            State::Http(idx) => {
+                if HTTP_SLASH[idx] != b {
+                    break;
                 }
+
+                if idx+1 == HTTP_SLASH.len() {
+                    state = State::FirstNumber(0);
+                } else {
+                    state = State::Http(idx+1);
+                }
+            }
+
+            State::FirstNumber(n) => {
+                if b.is_ascii_digit() {
+                    state = State::FirstNumber(n+1);
+                } else if b == b'.' && n > 0 {
+                    state = State::SecondNumber(0);
+                } else {
+                    break;
+                }
+            }
+
+            State::SecondNumber(n) => {
+                if b.is_ascii_digit() {
+                    state = State::SecondNumber(n+1);
+                } else if b == b' ' && n > 0 {
+                    state = State::Code;
+                } else {
+                    break;
+                }
+            }
+
+            State::Code => {
+                if b == b' ' {
+                    state = State::Reason;
+                } else if b.is_ascii_digit() {
+                    code = (code * 10) + (b - b'0') as i32;
+                } else {
+                    break;
+                }
+            }
+
+            State::Reason => {
+                if b == b'\r' {
+                    state = State::CR;
+                } else {
+                    reason_buf.push(b);
+                }
+            }
+
+            State::CR => {
+                if b == b'\n' {
+                    if let Ok(reason) = String::from_utf8(reason_buf) {
+                        return (code, reason);
+                    }
+                }
+                break;
             }
         }
     }
-    (503, "Server did not provide a status line".to_string())
+
+    return (503, "Server did not provide a status line".to_string());
+}
+
+
+#[test]
+fn test_parse_status_line() {
+    assert_eq!((200, "OK".to_string()), parse_status_line(b"HTTP/1.1 200 OK\r\n"));
+    assert_eq!((404, "Not found".to_string()), parse_status_line(b"HTTP/1.0 404 Not found\r\n"));
+
+    assert_eq!(503, parse_status_line(b"HTTP/1.1 200 OK\r").0);
+    assert_eq!(503, parse_status_line(b"HTTP/1.1 200 OK\n").0);
+    assert_eq!(503, parse_status_line(b"HTTP/1.1 200\r\n").0);
+    assert_eq!(503, parse_status_line(b"HTTP/1.1 ABC OK\r\n").0);
+    assert_eq!(503, parse_status_line(b"HTTP/1.Y 200 OK\r\n").0);
+    assert_eq!(503, parse_status_line(b"HTTP/X.0 200 OK\r\n").0);
+    assert_eq!(503, parse_status_line(b"HTTP/1. 200 OK\r\n").0);
+    assert_eq!(503, parse_status_line(b"HTTP/.1 200 OK\r\n").0);
+    assert_eq!(503, parse_status_line(b"HTTP/. 200 OK\r\n").0);
+    assert_eq!(503, parse_status_line(b"NOT_HTTP/1.0 200 OK\r\n").0);
 }
 
 fn parse_http_response_content(http_response: &[u8]) -> (HashMap<String, String>, Vec<u8>) {
